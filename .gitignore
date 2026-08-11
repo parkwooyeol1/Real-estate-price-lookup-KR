@@ -1,0 +1,35 @@
+# 실제 인증키 (절대 커밋 금지 — vworld_key.example.txt 참고해서 각자 생성)
+vworld_key.txt
+
+# 빌드 산출물
+build/
+dist/
+*.exe
+*.app/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 내부 개발 문서 (저장소 비공개)
+개발계획.md
+
+# 빌드 스크립트/설정 (로컬 빌드용 — 저장소에는 미포함)
+build.bat
+build_mac.sh
+BUILD_MAC.md
+make_icon.py
+부동산공시가격조회.spec
+app-icon.png
+app-icon.icns
+.github/workflows/build-mac.yml
+
+# OS / 에디터
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
