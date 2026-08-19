@@ -22,18 +22,33 @@ KB시세 등 비공개/크롤링 소스 대신, 공식·무료·합법인 국토
 
 import datetime
 import xml.etree.ElementTree as ET
+from urllib.parse import unquote
 
 import requests
 
 from config import DATA_GO_KR_API_KEY, has_datago_key
 
-BASE = "http://apis.data.go.kr/1613000"
+BASE = "https://apis.data.go.kr/1613000"
 ENDPOINTS = {
     "apt":  f"{BASE}/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade",
     "rh":   f"{BASE}/RTMSDataSvcRHTrade/getRTMSDataSvcRHTrade",
     "sh":   f"{BASE}/RTMSDataSvcSHTrade/getRTMSDataSvcSHTrade",
     "land": f"{BASE}/RTMSDataSvcLandTrade/getRTMSDataSvcLandTrade",
+    "offi": f"{BASE}/RTMSDataSvcOffiTrade/getRTMSDataSvcOffiTrade",
 }
+
+
+def _service_key() -> str:
+    """
+    인증키를 'Decoding(원본)' 형태로 반환.
+    data.go.kr는 Encoding(%2F·%2B·%3D 포함)·Decoding 두 형태를 주는데,
+    requests가 params 로 다시 인코딩하므로 원본(디코딩)을 넘겨야 이중 인코딩되지 않는다.
+    사용자가 Encoding 키를 넣어도 자동으로 풀어 처리한다.
+    """
+    key = (DATA_GO_KR_API_KEY or "").strip()
+    if "%" in key:                 # base64 키엔 '%'가 없으므로 '%'가 있으면 인코딩된 것
+        return unquote(key)
+    return key
 
 
 class NoKeyError(RuntimeError):
@@ -125,7 +140,7 @@ def _to_float(s: str) -> float | None:
 def _query(kind: str, lawd: str, ymd: str) -> tuple[list[dict], str | None]:
     """엔드포인트 1개 · 1개월 조회 → (items, error_msg)."""
     params = {
-        "serviceKey": DATA_GO_KR_API_KEY,
+        "serviceKey": _service_key(),
         "LAWD_CD": lawd,
         "DEAL_YMD": ymd,
         "numOfRows": "1000",
@@ -197,9 +212,10 @@ def get_trades(result: dict, months: int = 12, limit: int = 15) -> dict:
     apt = sec.get("apt") or {}
     apt_rows = apt.get("rows") or []
     if apt_rows and not apt.get("not_apt"):
+        # 공동주택: 아파트→연립다세대→오피스텔 순으로 시도(매칭 나오면 조기 종료)
         kind, name = "apt", (apt_rows[0].get("danji_name") or None)
         target_area = apt_rows[0].get("prvuse_area")
-        kinds = ["apt", "rh"]                     # 아파트 + 연립다세대 둘 다 훑어 매칭
+        kinds = ["apt", "rh", "offi"]
     elif (sec.get("house") or {}).get("price") is not None:
         kind, name, target_area = "house", None, None
         kinds = ["sh"]
@@ -210,43 +226,49 @@ def get_trades(result: dict, months: int = 12, limit: int = 15) -> dict:
         return {"ok": False, "kind": None, "name": None, "trades": [],
                 "message": "실거래가를 조회할 유형이 없습니다."}
 
+    def _match(k, d) -> dict | None:
+        """엔드포인트 응답 1건(d)을 조건에 맞으면 표준 dict 로, 아니면 None."""
+        row = _row_common(d)
+        if row["price"] is None:
+            return None
+        tname = (d.get("aptNm") or d.get("mhouseNm") or d.get("offiNm") or "")
+        tarea = _to_float(d.get("excluUseAr") or d.get("totalFloorAr")
+                          or d.get("dealArea") or d.get("plottageAr"))
+        if kind == "apt":
+            if not _name_match(name, tname):
+                return None
+            if target_area and tarea and abs(tarea - target_area) > 0.5:
+                return None            # 전용면적 ±0.5㎡ 이내만
+            unit = tname or name
+        elif kind == "house":
+            if target_jibun and row["jibun"] and row["jibun"] != target_jibun:
+                return None
+            unit = f"{row['umd'] or ''} {row['jibun'] or ''}".strip()
+        else:  # land
+            if target_jibun and row["jibun"] and row["jibun"] != target_jibun:
+                return None
+            unit = _get(d.get("jimok")) or "토지"
+        return {"date": row["date"], "price": row["price"], "area": tarea,
+                "floor": row["floor"], "unit": unit, "jibun": row["jibun"]}
+
     trades: list[dict] = []
     err_msg = None
+    ymds = _recent_months(months)
     try:
-        for ymd in _recent_months(months):
-            for k in kinds:
+        # 유형(엔드포인트)별로 훑되, 어떤 유형에서 매칭이 나오면 다음 유형은 조회하지 않음
+        # (아파트는 apt 에서 바로 끝나 빠르고, 승인 안 된 엔드포인트는 조용히 건너뜀)
+        for k in kinds:
+            for ymd in ymds:
                 items, err = _query(k, lawd, ymd)
                 if err:
                     err_msg = err
                     continue
                 for d in items:
-                    row = _row_common(d)
-                    if row["price"] is None:
-                        continue
-                    tname = (d.get("aptNm") or d.get("mhouseNm")
-                             or d.get("offiNm") or "")
-                    tarea = _to_float(d.get("excluUseAr") or d.get("totalFloorAr")
-                                      or d.get("dealArea") or d.get("plottageAr"))
-                    if kind == "apt":
-                        if not _name_match(name, tname):
-                            continue
-                        # 전용면적이 비슷한 거래만(±0.5㎡)
-                        if target_area and tarea and abs(tarea - target_area) > 0.5:
-                            continue
-                        unit = tname or name
-                    elif kind == "house":
-                        if target_jibun and row["jibun"] and row["jibun"] != target_jibun:
-                            continue
-                        unit = f"{row['umd'] or ''} {row['jibun'] or ''}".strip()
-                    else:  # land
-                        if target_jibun and row["jibun"] and row["jibun"] != target_jibun:
-                            continue
-                        unit = _get(d.get("jimok")) or "토지"
-                    trades.append({
-                        "date": row["date"], "price": row["price"],
-                        "area": tarea, "floor": row["floor"], "unit": unit,
-                        "jibun": row["jibun"],
-                    })
+                    m = _match(k, d)
+                    if m:
+                        trades.append(m)
+            if trades:
+                break
     except requests.RequestException as e:
         if not trades:
             return {"ok": False, "kind": kind, "name": name, "trades": [],
