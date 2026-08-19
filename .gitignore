@@ -1,5 +1,6 @@
 # 실제 인증키 (절대 커밋 금지 — vworld_key.example.txt 참고해서 각자 생성)
 vworld_key.txt
+datago_key.txt
 
 # 빌드 산출물
 build/

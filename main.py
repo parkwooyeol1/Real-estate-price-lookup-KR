@@ -18,10 +18,14 @@ import os
 import re
 import sys
 import threading
+from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 import address_router
 import share_util
+import map_util
+import rtms_api
+import export_util
 
 
 def resource_path(name: str) -> str:
@@ -158,7 +162,7 @@ class App(ctk.CTk):
 
         # 소유지분은 결과 블록마다 개별 버튼으로 제공한다(주소별 각각 적용).
         self.reset_btn = ctk.CTkButton(
-            srow, text="초기화", width=64, height=34, corner_radius=10,
+            srow, text="초기화", width=56, height=34, corner_radius=10,
             font=self.f_key, fg_color="transparent", border_width=1,
             border_color=BORDER, text_color=TEXT, hover_color=CARD,
             command=self.on_reset)
@@ -166,11 +170,19 @@ class App(ctk.CTk):
 
         # 여러 주소 환산가격을 한 창에 모아 보는 요약 버튼
         self.summary_btn = ctk.CTkButton(
-            srow, text="한눈에 보기", width=100, height=34, corner_radius=10,
+            srow, text="한눈에 보기", width=92, height=34, corner_radius=10,
             font=self.f_key, fg_color="transparent", border_width=1,
             border_color=BORDER, text_color=TEXT, hover_color=CARD,
             command=self.open_summary)
         self.summary_btn.pack(side="right", padx=(0, 8))
+
+        # 엑셀/PDF 내보내기
+        self.export_btn = ctk.CTkButton(
+            srow, text="내보내기", width=82, height=34, corner_radius=10,
+            font=self.f_key, fg_color="transparent", border_width=1,
+            border_color=BORDER, text_color=TEXT, hover_color=CARD,
+            command=self.on_export)
+        self.export_btn.pack(side="right", padx=(0, 8))
 
         # ── 상태 ─────────────────────────────
         self.status = ctk.CTkLabel(self, text="주소를 입력하고 조회하세요.",
@@ -457,6 +469,152 @@ class App(ctk.CTk):
                 ctk.CTkLabel(blk, text=formula, font=self.f_sub, text_color=SUB,
                              anchor="w", justify="left", wraplength=420).pack(fill="x")
 
+    # ── 지도 보기 (브라우저 인터랙티브 VWorld 지도) ─────────────────────────────
+    def on_map(self, r):
+        addr = r.get("base_address") or r.get("input") or ""
+        if not addr:
+            return
+        self.status.configure(text="지도를 여는 중…")
+
+        def work():
+            try:
+                ok = map_util.open_parcel_map(addr, label=addr)
+            except Exception:
+                ok = False
+            self.after(0, lambda: self.status.winfo_exists() and self.status.configure(
+                text=("지도를 열었습니다 (브라우저)." if ok
+                      else "좌표를 찾지 못해 지도를 열 수 없습니다.")))
+        threading.Thread(target=work, daemon=True).start()
+
+    # ── 실거래가 (국토부 RTMS) ─────────────────────────────
+    def open_trades(self, r, addr):
+        win = ctk.CTkToplevel(self)
+        win.title("국토부 실거래가")
+        win.geometry("520x560")
+        win.minsize(380, 360)
+        win.configure(fg_color=BG)
+        win.transient(self)
+        self._apply_icon(win)
+
+        ctk.CTkLabel(win, text="국토부 실거래가", font=self.f_h1,
+                     text_color=TEXT).pack(anchor="w", padx=22, pady=(20, 0))
+        ctk.CTkLabel(win, text="📍 " + addr, font=self.f_sub, text_color=SUB, anchor="w",
+                     justify="left", wraplength=460).pack(anchor="w", padx=22, pady=(2, 8))
+
+        box = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        loading = ctk.CTkLabel(box, text="실거래가 조회 중…  (최근 6개월)",
+                               font=self.f_key, text_color=SUB)
+        loading.pack(pady=40)
+
+        def work():
+            try:
+                data = rtms_api.get_trades(r, months=6)
+            except Exception as e:
+                data = {"ok": False, "message": str(e), "trades": []}
+            self.after(0, lambda: self._render_trades(box, loading, data))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _render_trades(self, box, loading, data):
+        if not box.winfo_exists():
+            return
+        loading.destroy()
+        trades = data.get("trades") or []
+        if not trades:
+            ctk.CTkLabel(box, text=(data.get("message") or "실거래 내역이 없습니다.").strip(),
+                         font=self.f_key, text_color=SUB, wraplength=440,
+                         justify="left").pack(pady=30, padx=10)
+            return
+        if data.get("name"):
+            ctk.CTkLabel(box, text=f"단지: {data['name']}", font=self.f_info_b,
+                         text_color=TEXT, anchor="w").pack(fill="x", padx=6, pady=(0, 6))
+        for t in trades:
+            card = ctk.CTkFrame(box, corner_radius=12, fg_color=CARD,
+                                border_width=1, border_color=LINE)
+            card.pack(fill="x", pady=(0, 8))
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=14, pady=(10, 2))
+            ctk.CTkLabel(top, text=t.get("date") or "-", font=self.f_info,
+                         text_color=SUB, anchor="w").pack(side="left")
+            price = t.get("price")
+            disp = f"{price:,}원" if isinstance(price, int) else "-"
+            cp = str(price) if isinstance(price, int) else ""
+            ctk.CTkButton(top, text=disp, font=self.f_info_b, text_color=TEXT,
+                          fg_color="transparent", hover_color=("#ECECEF", "#2A2A2C"),
+                          corner_radius=8, height=28, cursor="hand2",
+                          command=lambda c=cp: self._copy(c)).pack(side="right")
+            meta = []
+            if t.get("area"):
+                meta.append(f"{t['area']:g}㎡")
+            if t.get("floor"):
+                meta.append(f"{t['floor']}층")
+            if t.get("unit"):
+                meta.append(str(t["unit"]))
+            if meta:
+                ctk.CTkLabel(card, text="  ·  ".join(meta), font=self.f_sub,
+                             text_color=SUB, anchor="w", justify="left",
+                             wraplength=440).pack(fill="x", padx=14, pady=(0, 10))
+
+    # ── 엑셀/PDF 내보내기 ─────────────────────────────
+    def on_export(self):
+        if not (self._last_results or []):
+            messagebox.showinfo("내보내기", "먼저 주소를 조회하세요.")
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("내보내기")
+        win.geometry("300x170")
+        win.resizable(False, False)
+        win.configure(fg_color=BG)
+        win.transient(self)
+        self._apply_icon(win)
+        win.after(60, lambda: win.grab_set() if win.winfo_exists() else None)
+
+        ctk.CTkLabel(win, text="형식을 선택하세요", font=self.f_title,
+                     text_color=TEXT).pack(pady=(22, 14))
+        brow = ctk.CTkFrame(win, fg_color="transparent")
+        brow.pack(padx=22, fill="x")
+        ctk.CTkButton(brow, text="엑셀 (.xlsx)", height=44, corner_radius=10,
+                      font=self.f_btn, fg_color=ACCENT, hover_color=ACCENT_H,
+                      text_color=ON_ACCENT,
+                      command=lambda: self._do_export("excel", win)).pack(
+            fill="x", pady=(0, 8))
+        ctk.CTkButton(brow, text="PDF (.pdf)", height=44, corner_radius=10,
+                      font=self.f_btn, fg_color="transparent", border_width=1,
+                      border_color=BORDER, text_color=TEXT, hover_color=CARD,
+                      command=lambda: self._do_export("pdf", win)).pack(fill="x")
+
+    def _do_export(self, fmt, win=None):
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        if fmt == "excel":
+            path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx", filetypes=[("Excel 통합 문서", "*.xlsx")],
+                initialfile="공시가격_조회결과.xlsx")
+        else:
+            path = filedialog.asksaveasfilename(
+                defaultextension=".pdf", filetypes=[("PDF 문서", "*.pdf")],
+                initialfile="공시가격_조회결과.pdf")
+        if not path:
+            return
+        try:
+            if fmt == "excel":
+                export_util.export_excel(self._last_results, self._shares, path)
+            else:
+                export_util.export_pdf(self._last_results, self._shares, path)
+        except ImportError as e:
+            lib = "openpyxl" if fmt == "excel" else "reportlab"
+            messagebox.showerror(
+                "내보내기", f"필요한 라이브러리가 없습니다.\n\n설치: pip install {lib}\n\n{e}")
+            return
+        except Exception as e:
+            messagebox.showerror("내보내기", f"내보내기에 실패했습니다.\n\n{e}")
+            return
+        self.status.configure(text=f"✓ 저장됨: {os.path.basename(path)}")
+        try:
+            os.startfile(path)   # Windows: 저장 후 바로 열기
+        except Exception:
+            pass
+
     # ── 결과 위젯 헬퍼 ─────────────────────────────
     def _clear_results(self):
         for w in self.results.winfo_children():
@@ -585,19 +743,33 @@ class App(ctk.CTk):
             hdr = ctk.CTkFrame(self.results, fg_color="transparent")
             hdr.pack(fill="x", padx=4, pady=(0, 10))
             ctk.CTkLabel(hdr, text="📍 " + addr, font=self.f_info_b, text_color=TEXT,
-                         anchor="w", justify="left", wraplength=360).pack(
+                         anchor="w", justify="left", wraplength=210).pack(
                 side="left", fill="x", expand=True)
             if has_value:
                 on = self._cur_share is not None
                 ctk.CTkButton(
                     hdr, text=("지분 적용중" if on else "소유지분"),
-                    width=86, height=32, corner_radius=10, font=self.f_key,
+                    width=82, height=32, corner_radius=10, font=self.f_key,
                     fg_color=(ACCENT if on else "transparent"),
                     border_width=(0 if on else 1), border_color=BORDER,
                     text_color=(ON_ACCENT if on else TEXT),
                     hover_color=(ACCENT_H if on else CARD),
                     command=lambda ri=row_index: self.open_share_dialog(ri),
-                ).pack(side="right", padx=(8, 0))
+                ).pack(side="right", padx=(6, 0))
+                # 실거래가(국토부 RTMS) — 이 주소용
+                ctk.CTkButton(
+                    hdr, text="실거래가", width=68, height=32, corner_radius=10,
+                    font=self.f_key, fg_color="transparent", border_width=1,
+                    border_color=BORDER, text_color=TEXT, hover_color=CARD,
+                    command=lambda rr=r, aa=addr: self.open_trades(rr, aa),
+                ).pack(side="right", padx=(6, 0))
+                # 지도 보기 — 조회한 필지를 브라우저 지도에 표시
+                ctk.CTkButton(
+                    hdr, text="🗺 지도", width=64, height=32, corner_radius=10,
+                    font=self.f_key, fg_color="transparent", border_width=1,
+                    border_color=BORDER, text_color=TEXT, hover_color=CARD,
+                    command=lambda rr=r: self.on_map(rr),
+                ).pack(side="right", padx=(6, 0))
 
         if not r.get("ok"):
             self._note(self._card("조회 실패"),

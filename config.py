@@ -23,8 +23,11 @@ API 인증키 설정
    - 주의: 아래 도메인(VWORLD_DOMAIN)은 '키 발급 시 등록한 URL' 과 정확히 같아야 함(예: localhost).
      도메인이 다르면 정상 키라도 요청이 거부됩니다.
 
-■ 공공데이터포털 인증키 (현재 미사용)
-   - 발급: https://www.data.go.kr
+■ 공공데이터포털 인증키 (실거래가 조회용)
+   - 발급: https://www.data.go.kr → 로그인 → '국토교통부_아파트 매매 실거래가' 등 활용신청
+           → 마이페이지 > 인증키에서 '일반 인증키(Decoding)' 확인
+   - 용도: 국토교통부 실거래가(RTMS) 조회 (아파트/단독·다가구/토지)
+   - 갱신(재빌드 없이): 실행파일 옆에 `datago_key.txt` 파일을 만들고 1줄에 인증키를 적으면 됨.
 """
 
 import os
@@ -35,6 +38,10 @@ _DEFAULT_VWORLD_KEY = "여기에_VWORLD_인증키_입력"
 _DEFAULT_VWORLD_DOMAIN = "localhost"
 
 KEY_FILENAME = "vworld_key.txt"
+DATAGO_KEY_FILENAME = "datago_key.txt"
+
+# 공공데이터포털 인증키 내장 기본값 (외부 datago_key.txt 가 없을 때 사용)
+_DEFAULT_DATAGO_KEY = "여기에_공공데이터포털_인증키_입력"
 
 
 def _app_dir() -> str:
@@ -63,6 +70,28 @@ def _load_vworld() -> tuple[str, str]:
     return key, domain
 
 
+def _load_datago() -> str:
+    """실행파일 옆 datago_key.txt(1줄=인증키)가 있으면 그 키를, 없으면 내장 기본값."""
+    key = _DEFAULT_DATAGO_KEY
+    path = os.path.join(_app_dir(), DATAGO_KEY_FILENAME)
+    try:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f
+                         if ln.strip() and not ln.strip().startswith("#")]
+            if lines:
+                key = lines[0]
+    except Exception:
+        pass
+    return key
+
+
 VWORLD_API_KEY, VWORLD_DOMAIN = _load_vworld()
 
-DATA_GO_KR_API_KEY = "여기에_공공데이터포털_인증키_입력"
+DATA_GO_KR_API_KEY = _load_datago()
+
+
+def has_datago_key() -> bool:
+    """공공데이터포털 인증키가 실제로 설정돼 있는지(플레이스홀더가 아닌지)."""
+    k = (DATA_GO_KR_API_KEY or "").strip()
+    return bool(k) and "여기에" not in k
